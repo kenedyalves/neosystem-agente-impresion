@@ -1,0 +1,4 @@
+installer/payload/
+installer/dist/
+agente.ini
+agente.log

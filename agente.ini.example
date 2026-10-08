@@ -1,0 +1,42 @@
+; Configuracion del agente de impresion NEOSYSTEM.
+; Copie este archivo como agente.ini y complete los datos.
+
+; URL del ERP, sin barra al final.
+url = "https://miempresa.neosystem.com"
+
+; Debe ser IGUAL a PRINT_AGENT_TOKEN del .env del ERP.
+; Es la unica credencial del agente: trateló como una contraseña.
+token = "cambie-esto-por-el-token-del-erp"
+
+; Cola que este agente atiende. Debe coincidir con print_terminal en
+; Configuraciones generales del ERP.
+; Con varias maquinas imprimiendo cosas distintas (caja, cocina, barra), cada una
+; lleva su propio terminal y solo ve lo suyo.
+terminal = "principal"
+
+; Nombre con el que este agente aparece en el log del ERP.
+; Vacio = nombre de la maquina.
+agente = ""
+
+; Segundos entre consultas cuando no hay nada para imprimir.
+; 3 segundos es un buen equilibrio: el ticket sale casi al instante y el servidor
+; recibe 20 consultas por minuto. Bajarlo a 1 no se nota y triplica el trafico.
+intervalo = 3
+
+; Trabajos por consulta.
+lote = 5
+
+; Segundos de espera por el ERP antes de dar la consulta por perdida.
+timeout = 20
+
+; Archivo de log, al lado del agente. Rota solo al pasar los 5 MB.
+; Vacio = solo muestra en pantalla.
+log = "agente.log"
+
+; info  = registra cada impresion (recomendado al principio)
+; error = registra solo los problemas
+log_nivel = "info"
+
+; Dejar en 1. Poner 0 SOLO si el ERP esta en una red interna con certificado propio;
+; con 0 se deja de validar el certificado y el token viaja sin esa proteccion.
+verificar_ssl = 1

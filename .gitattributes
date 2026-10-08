@@ -1,0 +1,4 @@
+*.bat text eol=crlf
+*.iss text eol=crlf
+*.ps1 text eol=crlf
+*.ini.example text eol=crlf
