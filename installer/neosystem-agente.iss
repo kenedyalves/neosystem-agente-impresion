@@ -10,7 +10,7 @@
 
 #define AppName        "Agente de Impresion NEOSYSTEM"
 #define AppShortName   "NeosystemAgente"
-#define AppVersion     "1.1.0"
+#define AppVersion     "1.1.1"
 #define AppPublisher   "NEOSYSTEM"
 
 ; La dirección la escribe el cliente en la instalación, así que el campo arranca

@@ -75,6 +75,50 @@ foreach ($arquivo in $extensoes) {
     if (Test-Path $origem) { Copy-Item $origem (Join-Path $destPhp 'ext') } else { $faltando += "ext\$arquivo" }
 }
 
+# Runtime do Visual C++ (VC15), do qual o PHP 7.4 x64 depende.
+#
+# Sem isto, numa maquina com o VC++ Redistributable antigo o php.exe nem arranca:
+#   "'vcruntime140.dll' 14.0 is not compatible with this PHP build linked with 14.16"
+#
+# O Windows procura DLLs na pasta do executavel ANTES do System32, entao levar a copia
+# correta junto resolve sem pedir ao cliente que instale nada. Sao redistribuiveis.
+#
+# Os api-ms-win-crt-*.dll que o PHP tambem referencia fazem parte do Universal CRT, que ja
+# vem no Windows 10/11 — esses nao precisam viajar.
+$versaoMinimaVc = [version]'14.16'
+$runtimeVc = @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll')
+$vcCopiados = 0
+
+foreach ($arquivo in $runtimeVc) {
+    # Primeiro ao lado do proprio PHP (algumas distribuicoes ja o trazem), depois o sistema.
+    $candidatos = @(
+        (Join-Path $PhpOrigem $arquivo),
+        (Join-Path $env:SystemRoot "System32\$arquivo")
+    )
+
+    $origem = $candidatos | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    if (-not $origem) {
+        # vcruntime140.dll e obrigatorio; os outros dois so entram se existirem.
+        if ($arquivo -eq 'vcruntime140.dll') { $faltando += $arquivo }
+        continue
+    }
+
+    $info = (Get-Item $origem).VersionInfo
+    $versao = [version]"$($info.FileMajorPart).$($info.FileMinorPart)"
+
+    if ($versao -lt $versaoMinimaVc) {
+        Erro "$arquivo desta maquina e $versao, e o PHP exige $versaoMinimaVc ou maior."
+        Write-Host "   Instale o Visual C++ Redistributable 2015-2022 (x64) e rode de novo." -ForegroundColor Yellow
+        exit 1
+    }
+
+    Copy-Item $origem $destPhp
+    $vcCopiados++
+}
+
+Ok "runtime do Visual C++ embutido ($vcCopiados arquivo(s))"
+
 if ($faltando.Count -gt 0) {
     Erro "Nao achei em ${PhpOrigem}:"
     $faltando | ForEach-Object { Write-Host "     - $_" -ForegroundColor Red }
