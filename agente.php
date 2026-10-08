@@ -20,7 +20,7 @@
  */
 
 /** Se manda al ERP en cada consulta; aparece en la pantalla de agentes. */
-const VERSION_AGENTE = '1.1.1';
+const VERSION_AGENTE = '1.1.2';
 
 // -----------------------------------------------------------------------------
 // Configuracion

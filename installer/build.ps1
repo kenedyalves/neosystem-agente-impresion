@@ -1,4 +1,4 @@
-<#
+﻿<#
     Compila o instalador do Agente de Impressao NEOSYSTEM.
 
     Monta um PHP minimo (so o que o agente usa), copia o agente e chama o Inno Setup.
@@ -34,7 +34,7 @@ param(
     #   -CertificadoPfx "C:\cert.pfx" -SenhaCertificado "..."   (arquivo)
     #   -CertificadoThumbprint "A1B2..."                        (token USB / HSM / store)
     #
-    # Sem nenhuma delas o build segue e so avisa — util para testar.
+    # Sem nenhuma delas o build segue e so avisa - util para testar.
     [string] $CertificadoPfx = "",
     [string] $SenhaCertificado = "",
     [string] $CertificadoThumbprint = "",
@@ -130,6 +130,118 @@ function Invoke-Assinatura {
 }
 
 # ---------------------------------------------------------------------------
+# Dependencias nativas
+#
+# "No se puede encontrar el modulo especificado" quase nunca quer dizer que a DLL
+# pedida falta. Quer dizer que falta uma DEPENDENCIA dela. Foi o caso do php_curl.dll,
+# que precisa de libssh2.dll e nghttp2.dll: as duas ficavam de fora do pacote e o
+# curl nao carregava na maquina do cliente.
+#
+# E passava despercebido aqui porque a maquina de build tem o PHP de origem no PATH,
+# e o Windows acha as dependencias por lá. O cliente nao tem esse PATH. Por isso:
+#   1) as dependencias sao descobertas lendo a tabela de importacao do binario;
+#   2) a verificacao final roda com o PATH limpo, que e o que reproduz o cliente.
+#
+# A leitura do PE orienta o que copiar; quem reprova o build e a verificacao
+# funcional. Uma tabela de importacao nao conta tudo (ha carga tardia, ha API sets),
+# entao ela avisa, nao condena.
+# ---------------------------------------------------------------------------
+
+function ConvertTo-OffsetArquivo {
+    param($Rva, $Secoes)
+
+    foreach ($s in $Secoes) {
+        $tam = [Math]::Max($s.Tamanho, 1)
+        if ($Rva -ge $s.Virtual -and $Rva -lt ($s.Virtual + $tam)) {
+            return [int]($s.Bruto + ($Rva - $s.Virtual))
+        }
+    }
+    return -1
+}
+
+<#
+    Nomes das DLLs que um .exe/.dll importa, lidos do cabecalho PE.
+
+    Procurar a string "xxx.dll" dentro do binario NAO serve: da falso positivo (o
+    php7ts.dll "contem" libxml2.dll, que ele nao importa, porque libxml vem ligada
+    estaticamente). A tabela de importacao e a fonte certa.
+#>
+function Get-ImportacoesDll {
+    param([string] $Arquivo)
+
+    try { $b = [System.IO.File]::ReadAllBytes($Arquivo) } catch { return @() }
+    if ($b.Length -lt 0x40 -or $b[0] -ne 0x4D -or $b[1] -ne 0x5A) { return @() }   # MZ
+
+    $pe = [System.BitConverter]::ToInt32($b, 0x3C)
+    if ($pe -le 0 -or ($pe + 248) -ge $b.Length) { return @() }
+    if ($b[$pe] -ne 0x50 -or $b[$pe + 1] -ne 0x45) { return @() }                  # PE
+
+    $numSecoes   = [System.BitConverter]::ToUInt16($b, $pe + 6)
+    $tamOpcional = [System.BitConverter]::ToUInt16($b, $pe + 20)
+    $magia       = [System.BitConverter]::ToUInt16($b, $pe + 24)
+
+    # DataDirectory[1] e o diretorio de importacao. 112 (PE32+) / 96 (PE32) e o
+    # tamanho da parte fixa do cabecalho opcional; os +8 pulam o indice 0, que e a
+    # exportacao - ler o indice 0 por engano devolve nomes de funcao, nao de DLL.
+    $deslocDir = if ($magia -eq 0x20B) { 120 } else { 104 }
+    $rvaImport = [System.BitConverter]::ToUInt32($b, $pe + 24 + $deslocDir)
+    if ($rvaImport -eq 0) { return @() }
+
+    # As secoes sao o que permite converter RVA em posicao dentro do arquivo.
+    $secoes = @()
+    for ($i = 0; $i -lt $numSecoes; $i++) {
+        $s = $pe + 24 + $tamOpcional + ($i * 40)
+        if (($s + 40) -gt $b.Length) { break }
+        $secoes += [pscustomobject]@{
+            Tamanho = [System.BitConverter]::ToUInt32($b, $s + 8)
+            Virtual = [System.BitConverter]::ToUInt32($b, $s + 12)
+            Bruto   = [System.BitConverter]::ToUInt32($b, $s + 20)
+        }
+    }
+
+    $pos = ConvertTo-OffsetArquivo -Rva $rvaImport -Secoes $secoes
+    if ($pos -lt 0) { return @() }
+
+    $nomes = @()
+
+    # Descritores de 20 bytes; o nome e um RVA no deslocamento 12. Termina num
+    # descritor todo zerado.
+    while (($pos + 20) -le $b.Length) {
+        $rvaTabela = [System.BitConverter]::ToUInt32($b, $pos)
+        $rvaNome   = [System.BitConverter]::ToUInt32($b, $pos + 12)
+        if ($rvaTabela -eq 0 -and $rvaNome -eq 0) { break }
+
+        $off = ConvertTo-OffsetArquivo -Rva $rvaNome -Secoes $secoes
+        if ($off -ge 0) {
+            $fim = $off
+            while ($fim -lt $b.Length -and $b[$fim] -ne 0) { $fim++ }
+            if ($fim -gt $off) {
+                $nomes += [System.Text.Encoding]::ASCII.GetString($b, $off, $fim - $off)
+            }
+        }
+
+        $pos += 20
+    }
+
+    return @($nomes | Sort-Object -Unique)
+}
+
+<#
+    A dependencia e resolvida pelo proprio Windows?
+
+    Os api-ms-win-* NAO existem como arquivo em System32 - sao API sets que o loader
+    aponta para o ucrtbase.dll. Testar a existencia do arquivo os marcaria como
+    faltantes. Fazem parte do Universal CRT, que vem no Windows 10 e no 11.
+#>
+function Test-DllDoSistema {
+    param([string] $Nome)
+
+    if ($Nome -like 'api-ms-win-*') { return $true }
+
+    return Test-Path (Join-Path (Join-Path $env:SystemRoot 'System32') $Nome)
+}
+
+# ---------------------------------------------------------------------------
 Passo "Verificando o Inno Setup"
 
 if (-not $Iscc) {
@@ -181,7 +293,7 @@ foreach ($arquivo in $extensoes) {
 # correta junto resolve sem pedir ao cliente que instale nada. Sao redistribuiveis.
 #
 # Os api-ms-win-crt-*.dll que o PHP tambem referencia fazem parte do Universal CRT, que ja
-# vem no Windows 10/11 — esses nao precisam viajar.
+# vem no Windows 10/11 - esses nao precisam viajar.
 $versaoMinimaVc = [version]'14.16'
 $runtimeVc = @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll')
 $vcCopiados = 0
@@ -221,6 +333,60 @@ if ($faltando.Count -gt 0) {
     $faltando | ForEach-Object { Write-Host "     - $_" -ForegroundColor Red }
     Write-Host "   Aponte outra instalacao com -PhpOrigem" -ForegroundColor Yellow
     exit 1
+}
+
+# ---------------------------------------------------------------------------
+Passo "Resolvendo as dependencias nativas"
+
+# Nada aqui e listado a mao de proposito: o que o php_curl.dll precisa muda entre
+# versoes do PHP, e manter uma lista fixa significa descobrir cada falta na maquina
+# de um cliente. Le-se o que os binarios pedem e copia-se do PHP de origem.
+$naoResolvidas = @()
+$copiadas = 0
+
+# Repete porque uma dependencia copiada traz as suas proprias. Converge em 2-3
+# voltas; o limite so evita um laco infinito se algo estiver muito errado.
+for ($volta = 1; $volta -le 8; $volta++) {
+    $naoResolvidas = @()
+    $novas = 0
+
+    $noPacote = @(Get-ChildItem $destPhp -Recurse -File -EA SilentlyContinue |
+                  Where-Object { $_.Extension -in '.dll', '.exe' })
+    $nomes = @($noPacote | ForEach-Object { $_.Name.ToLower() })
+
+    foreach ($arq in $noPacote) {
+        foreach ($dep in (Get-ImportacoesDll $arq.FullName)) {
+            if ($nomes -contains $dep.ToLower()) { continue }
+            if (Test-DllDoSistema $dep) { continue }
+
+            $naOrigem = Join-Path $PhpOrigem $dep
+            if (Test-Path $naOrigem) {
+                Copy-Item $naOrigem $destPhp -Force
+                Write-Host "   + $dep  (pedida por $($arq.Name))" -ForegroundColor DarkGray
+                $copiadas++
+                $novas++
+                continue
+            }
+
+            $pendente = "$dep (pedida por $($arq.Name))"
+            if ($naoResolvidas -notcontains $pendente) { $naoResolvidas += $pendente }
+        }
+    }
+
+    if ($novas -eq 0) { break }
+}
+
+if ($copiadas -gt 0) {
+    Ok "$copiadas dependencia(s) acrescentada(s) ao pacote"
+} else {
+    Ok "nenhuma dependencia faltava"
+}
+
+if ($naoResolvidas.Count -gt 0) {
+    # Aviso, nao erro: pode ser carga tardia ou um nome que o loader resolve de outra
+    # forma. Quem decide e a verificacao funcional mais abaixo.
+    Aviso "nao achei estas dependencias nem no sistema nem em ${PhpOrigem}:"
+    $naoResolvidas | ForEach-Object { Write-Host "     - $_" -ForegroundColor Yellow }
 }
 
 # php.ini proprio: extension_dir relativo, para o PHP achar as DLLs onde quer que
@@ -267,14 +433,75 @@ Ok "agente.php e iniciar.bat prontos"
 # ---------------------------------------------------------------------------
 Passo "Verificando o runtime montado"
 
-# Melhor descobrir aqui do que na maquina do cliente.
-$teste = & (Join-Path $destPhp 'php.exe') -r "echo (function_exists('curl_init') && in_array('https', stream_get_wrappers()) && function_exists('mb_substr') && function_exists('iconv')) ? 'OK' : 'FALTA';" 2>&1
+$php = Join-Path $destPhp 'php.exe'
 
-if ($teste -notmatch 'OK') {
-    Erro "O PHP montado nao tem tudo o que o agente precisa: $teste"
+# O diagnostico vai num arquivo, e nao em -r, para a mensagem dizer QUAL item falta
+# em vez de um "FALTA" generico. Fica fora do payload para nao ser empacotado.
+$verificador = Join-Path $env:TEMP "neosystem-verificar-$PID.php"
+
+@'
+<?php
+$itens = [
+    'curl'     => 'extension_loaded',
+    'openssl'  => 'extension_loaded',
+    'mbstring' => 'extension_loaded',
+];
+
+$faltam = [];
+
+foreach ($itens as $nome => $teste) {
+    if (!$teste($nome)) {
+        $faltam[] = $nome;
+    }
+}
+
+// O agente converte acentos para a codepage da impressora e para a consola.
+if (!function_exists('iconv')) {
+    $faltam[] = 'iconv';
+}
+
+// Sem o wrapper https o agente nao fala com um ERP publicado em TLS.
+if (!in_array('https', stream_get_wrappers(), true)) {
+    $faltam[] = 'wrapper https';
+}
+
+echo $faltam ? 'FALTA: ' . implode(', ', $faltam) : 'OK';
+'@ | Set-Content $verificador -Encoding ASCII
+
+# PATH limpo: e isto que reproduz a maquina do cliente.
+#
+# Com o PATH desta maquina, o Windows acha em C:\Server\Php qualquer dependencia que
+# tenha ficado fora do pacote, e o build aprova um instalador quebrado - foi
+# exatamente o que aconteceu com o libssh2.dll/nghttp2.dll do curl. A pasta do
+# proprio executavel continua sendo procurada primeiro, que e o que o pacote usa.
+$pathOriginal = $env:PATH
+$env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+
+try {
+    # display_errors=stderr porque o php.ini do pacote os silencia, e aqui queremos ver.
+    $teste = & $php -d display_errors=stderr -d log_errors=0 $verificador 2>&1
+} finally {
+    $env:PATH = $pathOriginal
+    Remove-Item $verificador -Force -EA SilentlyContinue
+}
+
+$linhas = @(($teste | Out-String) -split "`r?`n" | Where-Object { $_.Trim() })
+$passou = @($linhas | Where-Object { $_.Trim() -eq 'OK' }).Count -gt 0
+
+if (-not $passou) {
+    Erro "O runtime montado nao serve (testado com o PATH limpo, como na maquina do cliente):"
+    $linhas | ForEach-Object { Write-Host "     $_" -ForegroundColor Red }
+    Write-Host "   Quase sempre e dependencia de DLL faltando - veja os avisos acima." -ForegroundColor Yellow
     exit 1
 }
-Ok "curl, https, mbstring e iconv presentes"
+
+# Passou, mas o PHP reclamou de algo: nao reprova o build, e nao pode ficar escondido.
+if ($linhas.Count -gt 1) {
+    Aviso "o PHP funcionou, mas reclamou:"
+    $linhas | Where-Object { $_.Trim() -ne 'OK' } | ForEach-Object { Write-Host "     $_" -ForegroundColor Yellow }
+}
+
+Ok "curl, openssl, mbstring, iconv e https presentes (com o PATH limpo)"
 
 # php -l no agente, com o proprio runtime que vai ser distribuido.
 $lint = & (Join-Path $destPhp 'php.exe') -l (Join-Path $payload 'agente.php') 2>&1
