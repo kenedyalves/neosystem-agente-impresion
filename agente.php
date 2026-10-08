@@ -20,7 +20,7 @@
  */
 
 /** Se manda al ERP en cada consulta; aparece en la pantalla de agentes. */
-const VERSION_AGENTE = '1.0.0';
+const VERSION_AGENTE = '1.1.0';
 
 // -----------------------------------------------------------------------------
 // Configuracion
@@ -95,7 +95,7 @@ function registrar($nivel, $mensaje)
 
     $linea = sprintf("[%s] %-5s %s\n", date('Y-m-d H:i:s'), strtoupper($nivel), $mensaje);
 
-    echo $linea;
+    echo paraConsola($linea);
 
     if ($LOG_RUTA) {
         // El log no puede tumbar al agente: si el disco esta lleno, seguimos imprimiendo.
@@ -108,15 +108,121 @@ function registrar($nivel, $mensaje)
     }
 }
 
+/**
+ * Texto listo para mostrar, sin acentos.
+ *
+ * El agente trabaja en UTF-8, pero su salida se lee en dos lugares con codificaciones
+ * distintas: el CMD de Windows (CP850) y el instalador (CP1252). Convertir a una rompe la
+ * otra — "Código inválido" terminaba como "CÃ³digo invÃ¡lido" o "C?digo inv?lido" según
+ * dónde se mirara.
+ *
+ * Quitar los acentos sale bien en las dos: "Codigo invalido" se lee perfecto y no depende de
+ * ninguna codificación. Es un mensaje técnico corto, no un texto que se imprima al cliente.
+ */
+function paraConsola($texto)
+{
+    // Tabla explícita en vez de iconv //TRANSLIT: según el build, TRANSLIT devuelve "C'odigo"
+    // con apóstrofo en lugar de "Codigo", que queda peor que el acento roto.
+    static $mapa = [
+        "\u{00e1}" => 'a', "\u{00e0}" => 'a', "\u{00e3}" => 'a', "\u{00e2}" => 'a', "\u{00e4}" => 'a',
+        "\u{00e9}" => 'e', "\u{00e8}" => 'e', "\u{00ea}" => 'e', "\u{00eb}" => 'e',
+        "\u{00ed}" => 'i', "\u{00ec}" => 'i', "\u{00ee}" => 'i', "\u{00ef}" => 'i',
+        "\u{00f3}" => 'o', "\u{00f2}" => 'o', "\u{00f5}" => 'o', "\u{00f4}" => 'o', "\u{00f6}" => 'o',
+        "\u{00fa}" => 'u', "\u{00f9}" => 'u', "\u{00fb}" => 'u', "\u{00fc}" => 'u',
+        "\u{00f1}" => 'n', "\u{00e7}" => 'c',
+        "\u{00c1}" => 'A', "\u{00c0}" => 'A', "\u{00c3}" => 'A', "\u{00c2}" => 'A', "\u{00c4}" => 'A',
+        "\u{00c9}" => 'E', "\u{00c8}" => 'E', "\u{00ca}" => 'E', "\u{00cb}" => 'E',
+        "\u{00cd}" => 'I', "\u{00cc}" => 'I', "\u{00ce}" => 'I', "\u{00cf}" => 'I',
+        "\u{00d3}" => 'O', "\u{00d2}" => 'O', "\u{00d5}" => 'O', "\u{00d4}" => 'O', "\u{00d6}" => 'O',
+        "\u{00da}" => 'U', "\u{00d9}" => 'U', "\u{00db}" => 'U', "\u{00dc}" => 'U',
+        "\u{00d1}" => 'N', "\u{00c7}" => 'C',
+        "\u{00bf}" => '?', "\u{00a1}" => '!',
+        "\u{2013}" => '-', "\u{2014}" => '-',
+        "\u{201c}" => '"', "\u{201d}" => '"', "\u{2018}" => "'", "\u{2019}" => "'",
+        "\u{2026}" => '...',
+    ];
+
+    return strtr($texto, $mapa);
+}
+
 function salir($mensaje)
 {
-    fwrite(STDERR, $mensaje . "\n");
+    fwrite(STDERR, paraConsola($mensaje) . "\n");
     exit(1);
 }
 
 // -----------------------------------------------------------------------------
 // Comunicacion con el ERP
 // -----------------------------------------------------------------------------
+
+/**
+ * Certificados raíz para validar HTTPS.
+ *
+ * El PHP que viaja con el agente no trae su propio paquete de certificados, así que sin esto
+ * TODA conexión https falla con "unable to get local issuer certificate". Y hay un segundo
+ * caso, que se ve seguido en la calle: antivirus como Avast o Kaspersky interceptan el HTTPS
+ * y reemplazan el certificado del servidor por uno propio — Windows confía en ese certificado
+ * (el antivirus instala su raíz al instalarse), pero cURL no, porque usa su propia lista.
+ *
+ * Exportar las raíces de Windows resuelve los dos casos de una vez: trae las CA públicas y
+ * también la del antivirus. Se genera una sola vez y queda guardado al lado del agente.
+ *
+ * @return string|null Ruta del archivo, o null si no se pudo generar.
+ */
+function rutaCertificados($forzar = false)
+{
+    $archivo = __DIR__ . DIRECTORY_SEPARATOR . 'certificados.pem';
+
+    // Sirve si existe, no está vacío y no pasó de 30 días: las raíces cambian de vez en cuando.
+    $vigente = is_file($archivo)
+        && filesize($archivo) > 1024
+        && (time() - filemtime($archivo)) < 2592000;
+
+    if ($vigente && ! $forzar) {
+        return $archivo;
+    }
+
+    if (strtoupper(substr(PHP_OS, 0, 3)) !== 'WIN') {
+        return $vigente ? $archivo : null;
+    }
+
+    // Exporta las raíces que Windows ya considera confiables.
+    $script = '$sb = New-Object Text.StringBuilder; '
+            . 'foreach ($l in @("Cert:\LocalMachine\Root","Cert:\CurrentUser\Root")) { '
+            . 'Get-ChildItem $l -EA SilentlyContinue | ForEach-Object { try { '
+            . '[void]$sb.AppendLine("-----BEGIN CERTIFICATE-----"); '
+            . '[void]$sb.AppendLine([Convert]::ToBase64String($_.RawData,"InsertLineBreaks")); '
+            . '[void]$sb.AppendLine("-----END CERTIFICATE-----") } catch {} } }; '
+            . '[IO.File]::WriteAllText("' . str_replace('\\', '\\\\', $archivo) . '", $sb.ToString())';
+
+    @exec('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "'
+        . str_replace('"', '\"', $script) . '" 2>&1');
+
+    if (is_file($archivo) && filesize($archivo) > 1024) {
+        return $archivo;
+    }
+
+    return $vigente ? $archivo : null;
+}
+
+/**
+ * Regenera las raíces y avisa si vale la pena reintentar la conexión.
+ *
+ * Devuelve true UNA sola vez por ejecución: si el reintento también falla, el problema no son
+ * las raíces, y seguir regenerando sería un bucle entre esta función y llamar().
+ */
+function regenerarCertificados()
+{
+    static $yaIntentado = false;
+
+    if ($yaIntentado) {
+        return false;
+    }
+
+    $yaIntentado = true;
+
+    return rutaCertificados(true) !== null;
+}
 
 /**
  * @return array{ok:bool, status:int, body:array|null, error:string|null}
@@ -140,6 +246,9 @@ function llamar(array $config, $metodo, $ruta, array $datos = null)
         // Solo para redes internas con certificado propio.
         $opciones[CURLOPT_SSL_VERIFYPEER] = false;
         $opciones[CURLOPT_SSL_VERIFYHOST] = 0;
+    } elseif ($certificados = rutaCertificados()) {
+        // El PHP que viaja con el agente no trae raíces propias: sin esto, https nunca valida.
+        $opciones[CURLOPT_CAINFO] = $certificados;
     }
 
     if ($metodo === 'POST') {
@@ -154,6 +263,17 @@ function llamar(array $config, $metodo, $ruta, array $datos = null)
     $errorCurl = curl_error($ch);
 
     curl_close($ch);
+
+    // Falla de certificado: puede ser que las raíces guardadas hayan quedado viejas, o que un
+    // antivirus haya empezado a interceptar el HTTPS después de la instalación. Se regeneran
+    // una vez y se reintenta; si vuelve a fallar, el error sube y se explica al usuario.
+    if ($respuesta === false
+        && $config['verificar_ssl']
+        && stripos((string) $errorCurl, 'certificate') !== false
+        && regenerarCertificados()) {
+
+        return llamar(array_merge($config, ['verificar_ssl' => true]), $metodo, $ruta, $datos);
+    }
 
     if ($respuesta === false) {
         return ['ok' => false, 'status' => 0, 'body' => null, 'error' => $errorCurl ?: 'Sin respuesta'];
@@ -355,10 +475,75 @@ function ticketDePrueba()
 // -----------------------------------------------------------------------------
 
 /**
+ * Traduce una falla de emparejamiento a algo accionable.
+ *
+ * Antes se devolvía el error crudo, y cuando el servidor contestaba 404 el instalador mostraba
+ * su lista genérica de causas — ninguna de las cuales era la verdadera. Quien instalaba se
+ * quedaba sin saber que el ERP todavía no tenía el módulo. Cada caso de abajo apareció de
+ * verdad durante la puesta en marcha.
+ */
+function explicarFalhaDeEmparejamiento(array $r, $url)
+{
+    $status = isset($r['status']) ? (int) $r['status'] : 0;
+    $delServidor = is_array($r['body']) && isset($r['body']['error']) ? $r['body']['error'] : null;
+
+    // Sin respuesta: ni siquiera se llegó al servidor.
+    if ($status === 0) {
+        $detalle = isset($r['error']) ? $r['error'] : 'sin detalle';
+
+        if (stripos($detalle, 'resolve host') !== false || stripos($detalle, 'resolver') !== false) {
+            return "No se encontró el servidor \"$url\"." . PHP_EOL
+                 . '  Revise que la dirección esté bien escrita.';
+        }
+
+        if (stripos($detalle, 'refused') !== false) {
+            return "El servidor \"$url\" rechazó la conexión." . PHP_EOL
+                 . '  Puede estar apagado, o la dirección tener el puerto equivocado.';
+        }
+
+        if (stripos($detalle, 'timed out') !== false || stripos($detalle, 'timeout') !== false) {
+            return "El servidor \"$url\" no respondió a tiempo." . PHP_EOL
+                 . '  Revise la conexión a internet de esta computadora.';
+        }
+
+        if (stripos($detalle, 'ssl') !== false || stripos($detalle, 'certificate') !== false) {
+            return 'Problema con el certificado de seguridad del servidor.' . PHP_EOL
+                 . '  Si es un servidor interno, agregue verificar_ssl = 0 en agente.ini.';
+        }
+
+        return "No se pudo contactar al servidor \"$url\": $detalle";
+    }
+
+    // 404: la ruta no existe. Es el ERP que está desactualizado, no el código.
+    if ($status === 404) {
+        return 'El sistema en "' . $url . '" no tiene el agente de impresión instalado.' . PHP_EOL
+             . '  El módulo de impresión todavía no fue publicado en ese servidor,' . PHP_EOL
+             . '  o la dirección apunta a otro sistema. Avise al soporte técnico.';
+    }
+
+    // 422: la ruta existe y contestó por qué rechazó — ese mensaje es el bueno.
+    if ($status === 422 && $delServidor) {
+        return $delServidor;
+    }
+
+    if ($status >= 500) {
+        return 'El sistema respondió con un error interno (HTTP ' . $status . ').' . PHP_EOL
+             . '  Si es la primera instalación, puede faltar ejecutar las migraciones.' . PHP_EOL
+             . '  Avise al soporte técnico.';
+    }
+
+    if ($delServidor) {
+        return $delServidor;
+    }
+
+    return 'El sistema respondió HTTP ' . $status . ' sin explicar el motivo.';
+}
+
+/**
  * Canjea el código corto por las credenciales y escribe el agente.ini.
  *
  * Es lo que el instalador ejecuta al final: el cliente tipea 6 caracteres y nunca ve el token.
- * El código sirve una sola vez y vale 15 minutos, así que no hay nada que resguardar después.
+ * El código sirve una sola vez y vale 1 hora, así que no hay nada que resguardar después.
  */
 function emparejar($url, $codigo, $rutaConfig, $verificarSsl = true)
 {
@@ -387,9 +572,7 @@ function emparejar($url, $codigo, $rutaConfig, $verificarSsl = true)
     ]);
 
     if (! $r['ok']) {
-        $detalle = is_array($r['body']) && isset($r['body']['error']) ? $r['body']['error'] : $r['error'];
-
-        return ['ok' => false, 'error' => $detalle];
+        return ['ok' => false, 'error' => explicarFalhaDeEmparejamiento($r, $url)];
     }
 
     $cuerpo = $r['body'];
@@ -479,7 +662,12 @@ foreach ($argumentos as $arg) {
 
 // El emparejamiento corre ANTES de cargar la configuración: es justamente lo que la crea, así
 // que en una instalación nueva el agente.ini todavía no existe.
-if ($codigoPar = argumento($argumentos, 'pair')) {
+// `!== null` e não um teste de verdade: com `--pair=` vazio, uma string vazia é falsy e el
+// agente seguía de largo hasta "falta agente.ini" — un mensaje que no tiene nada que ver con
+// lo que la persona intentó hacer.
+$codigoPar = argumento($argumentos, 'pair');
+
+if ($codigoPar !== null) {
     // `--sin-ssl` es una bandera sin valor, así que se busca por presencia y no con
     // argumento(), que lee `--clave=valor`.
     $resultado = emparejar(
@@ -493,8 +681,8 @@ if ($codigoPar = argumento($argumentos, 'pair')) {
         salir('Emparejamiento fallido: ' . $resultado['error']);
     }
 
-    echo 'Emparejado correctamente.' . PHP_EOL;
-    echo '  Terminal: ' . $resultado['terminal'] . PHP_EOL;
+    echo paraConsola('Emparejado correctamente.') . PHP_EOL;
+    echo paraConsola('  Terminal: ' . $resultado['terminal']) . PHP_EOL;
     echo '  Configuración guardada en ' . $rutaConfig . PHP_EOL;
     exit(0);
 }

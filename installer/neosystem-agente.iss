@@ -10,7 +10,7 @@
 
 #define AppName        "Agente de Impresion NEOSYSTEM"
 #define AppShortName   "NeosystemAgente"
-#define AppVersion     "1.0.0"
+#define AppVersion     "1.1.0"
 #define AppPublisher   "NEOSYSTEM"
 
 ; La dirección la escribe el cliente en la instalación, así que el campo arranca
@@ -102,7 +102,7 @@ begin
     'Vincule esta computadora con su NEOSYSTEM',
     'Escriba la dirección con la que entra al sistema desde el navegador, y el' + #13#10 +
     'código que le muestra la pantalla Agentes de impresión al hacer clic en' + #13#10 +
-    '"Agregar impresora". El código vale 15 minutos.');
+    '"Agregar impresora". El código vale 1 hora.');
 
   PaginaPar.Add('Dirección del sistema (ej: https://miempresa.neosystem.com):', False);
   PaginaPar.Add('Código de emparejamiento:', False);
@@ -240,29 +240,59 @@ begin
 end;
 
 { Corre el emparejamiento y devuelve True si quedó configurado. }
+{ Motivo real de la última falla, dicho por el agente. }
+var
+  UltimoErrorPar: string;
+
 function Emparejar(const Codigo, Url: string): Boolean;
 var
-  Ejecutable, Parametros, ArchivoIni: string;
+  Ejecutable, Parametros, ArchivoIni, ArchivoSalida: string;
+  { LoadStringFromFile exige AnsiString; declararla como String da "Type mismatch". }
+  Salida: AnsiString;
   Resultado: Integer;
 begin
-  Ejecutable := ExpandConstant('{app}\php\php.exe');
-  ArchivoIni := ExpandConstant('{app}\agente.ini');
+  UltimoErrorPar := '';
 
-  Parametros := '"' + ExpandConstant('{app}\agente.php') + '"' +
+  Ejecutable    := ExpandConstant('{app}\php\php.exe');
+  ArchivoIni    := ExpandConstant('{app}\agente.ini');
+  ArchivoSalida := ExpandConstant('{tmp}\emparejar.txt');
+
+  { Se corre a través de cmd para poder capturar lo que el agente imprime. Sin esto el
+    instalador sólo ve el código de salida, y el motivo real — que el agente explica bien —
+    se pierde justo cuando más falta hace. }
+  Parametros := '/C ""' + Ejecutable + '" "' + ExpandConstant('{app}\agente.php') + '"' +
                 ' --pair=' + Codigo +
-                ' --url="' + Url + '"';
+                ' --url="' + Url + '"' +
+                ' > "' + ArchivoSalida + '" 2>&1"';
 
-  if not Exec(Ejecutable, Parametros, ExpandConstant('{app}'),
+  if not Exec(ExpandConstant('{cmd}'), Parametros, ExpandConstant('{app}'),
               SW_HIDE, ewWaitUntilTerminated, Resultado) then
   begin
-    Avisar('No se pudo ejecutar el agente para emparejar.' + #13#10 +
-           'Código del sistema: ' + IntToStr(Resultado), mbError);
+    UltimoErrorPar := 'No se pudo ejecutar el agente para emparejar.';
     Result := False;
     Exit;
   end;
 
   { El agente devuelve 0 sólo cuando llegó a escribir el agente.ini. }
   Result := (Resultado = 0) and FileExists(ArchivoIni);
+
+  if not Result then
+  begin
+    if LoadStringFromFile(ArchivoSalida, Salida) then
+    begin
+      UltimoErrorPar := Trim(String(Salida));
+
+      { El agente prefija con "Emparejamiento fallido: "; acá sobra. }
+      if Pos('Emparejamiento fallido:', UltimoErrorPar) = 1 then
+        UltimoErrorPar := Trim(Copy(UltimoErrorPar,
+                               Length('Emparejamiento fallido:') + 1, MaxInt));
+    end;
+
+    if UltimoErrorPar = '' then
+      UltimoErrorPar := 'El agente terminó con código ' + IntToStr(Resultado) + '.';
+  end;
+
+  DeleteFile(ArchivoSalida);
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -299,7 +329,7 @@ begin
   begin
     MsgBox('Escriba el código de emparejamiento.' + #13#10 + #13#10 +
            'Lo obtiene en el sistema, en Agentes de impresión >' + #13#10 +
-           '"Agregar impresora". Son 6 caracteres y valen 15 minutos.', mbError, MB_OK);
+           '"Agregar impresora". Son 6 caracteres y valen 1 hora.', mbError, MB_OK);
     Result := False;
     Exit;
   end;
@@ -345,12 +375,14 @@ begin
   end
   else
   begin
+    { Se muestra el motivo REAL que devolvió el agente, no una lista de causas posibles:
+      la primera vez que esto falló en la calle, ninguna de las causas listadas era la
+      verdadera, y quien instalaba no tenía cómo saberlo. }
     Avisar('El agente se instaló, pero no se pudo vincular con el sistema.' + #13#10 + #13#10 +
-           'Causas habituales:' + #13#10 +
-           '  - el código ya venció (vale 15 minutos) o ya fue usado' + #13#10 +
-           '  - la dirección del sistema es incorrecta' + #13#10 +
-           '  - esta computadora no tiene acceso a internet' + #13#10 + #13#10 +
-           'Genere un código nuevo en el sistema y vuelva a ejecutar este instalador.',
+           'Motivo:' + #13#10 +
+           UltimoErrorPar + #13#10 + #13#10 +
+           'Corrija lo indicado, genere un código nuevo si hiciera falta' + #13#10 +
+           'y vuelva a ejecutar este instalador.',
            mbError);
   end;
 end;
