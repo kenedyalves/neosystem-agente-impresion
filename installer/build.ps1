@@ -21,7 +21,27 @@ param(
     # dele na instalacao. Serve para gerar um instalador dedicado a um cliente.
     [string] $Url = "",
 
-    [string] $Iscc = ""
+    [string] $Iscc = "",
+
+    # --- Assinatura digital (opcional) -------------------------------------
+    #
+    # Sem assinar, o Windows reclama do instalador: o SmartScreen mostra "editor
+    # desconhecido", e o Smart App Control do Windows 11 simplesmente BLOQUEIA, sem
+    # opcao de prosseguir. Como nem o php.exe nem o instalador sao assinados de fabrica,
+    # em maquina com Smart App Control ligado nao ha como instalar sem certificado.
+    #
+    # Duas formas de informar o certificado:
+    #   -CertificadoPfx "C:\cert.pfx" -SenhaCertificado "..."   (arquivo)
+    #   -CertificadoThumbprint "A1B2..."                        (token USB / HSM / store)
+    #
+    # Sem nenhuma delas o build segue e so avisa — util para testar.
+    [string] $CertificadoPfx = "",
+    [string] $SenhaCertificado = "",
+    [string] $CertificadoThumbprint = "",
+
+    # O carimbo de tempo e o que mantem a assinatura valida depois que o certificado
+    # vence. Sem ele, tudo o que foi assinado "expira" junto.
+    [string] $CarimboUrl = "http://timestamp.sectigo.com"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,6 +51,83 @@ Set-Location $raiz
 function Passo($t) { Write-Host "`n>> $t" -ForegroundColor Cyan }
 function Erro($t)  { Write-Host "   ERRO: $t" -ForegroundColor Red }
 function Ok($t)    { Write-Host "   $t" -ForegroundColor Green }
+function Aviso($t) { Write-Host "   $t" -ForegroundColor Yellow }
+
+# ---------------------------------------------------------------------------
+# Assinatura digital
+# ---------------------------------------------------------------------------
+
+function Get-SignTool {
+    $cmd = Get-Command signtool.exe -EA SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    # Vem com o Windows SDK; a versao mais nova costuma ser a melhor.
+    foreach ($base in @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "$env:ProgramFiles\Windows Kits\10\bin")) {
+        if (-not (Test-Path $base)) { continue }
+
+        $achado = Get-ChildItem $base -Recurse -Filter 'signtool.exe' -EA SilentlyContinue |
+                  Where-Object { $_.FullName -match '\\x64\\' } |
+                  Sort-Object FullName -Descending | Select-Object -First 1
+
+        if ($achado) { return $achado.FullName }
+    }
+
+    return $null
+}
+
+function Test-AssinaturaConfigurada {
+    return ($CertificadoPfx -and (Test-Path $CertificadoPfx)) -or $CertificadoThumbprint
+}
+
+<#
+    Assina os arquivos informados.
+
+    Assina-se TUDO que é executável, não só o instalador: o php.exe e as DLLs que viajam
+    dentro dele também não são assinados de fábrica, e o Smart App Control olha o que
+    está sendo executado, não só o que foi baixado.
+#>
+function Invoke-Assinatura {
+    param([string[]] $Arquivos, [string] $Descricao = 'Agente de Impresion NEOSYSTEM')
+
+    if (-not (Test-AssinaturaConfigurada)) { return $true }
+
+    $signtool = Get-SignTool
+    if (-not $signtool) {
+        Erro "Certificado informado, mas o signtool.exe nao foi encontrado."
+        Write-Host "   Instale o Windows SDK (componente 'Signing Tools')." -ForegroundColor Yellow
+        return $false
+    }
+
+    $existentes = $Arquivos | Where-Object { Test-Path $_ }
+    if (-not $existentes) { return $true }
+
+    $args = @('sign', '/fd', 'SHA256', '/td', 'SHA256', '/tr', $CarimboUrl, '/d', $Descricao)
+
+    if ($CertificadoThumbprint) {
+        # Token USB ou HSM: o certificado vive no store do Windows.
+        $args += @('/sha1', $CertificadoThumbprint)
+    } else {
+        $args += @('/f', $CertificadoPfx)
+        if ($SenhaCertificado) { $args += @('/p', $SenhaCertificado) }
+    }
+
+    $args += $existentes
+
+    # A saida e silenciada porque a linha de comando carrega a senha do certificado.
+    $saida = & $signtool @args 2>&1
+    $codigo = $LASTEXITCODE
+
+    if ($codigo -ne 0) {
+        Erro "Falha ao assinar (signtool codigo $codigo)."
+        # Mostra o erro sem ecoar a senha.
+        $saida | Where-Object { $_ -notmatch [regex]::Escape($SenhaCertificado) -or -not $SenhaCertificado } |
+            Select-Object -Last 5 | ForEach-Object { Write-Host "     $_" -ForegroundColor Red }
+        return $false
+    }
+
+    Ok "assinados: $($existentes.Count) arquivo(s)"
+    return $true
+}
 
 # ---------------------------------------------------------------------------
 Passo "Verificando o Inno Setup"
@@ -188,6 +285,24 @@ if ($lint -notmatch 'No syntax errors') {
 Ok "agente.php sem erros de sintaxe"
 
 # ---------------------------------------------------------------------------
+Passo "Assinatura digital do conteudo"
+
+if (Test-AssinaturaConfigurada) {
+    # Antes de empacotar: o que vai ser EXECUTADO na maquina do cliente.
+    $paraAssinar = @(
+        (Join-Path $destPhp 'php.exe'),
+        (Join-Path $destPhp 'php7ts.dll')
+    ) + (Get-ChildItem (Join-Path $destPhp 'ext') -Filter '*.dll' -EA SilentlyContinue | ForEach-Object { $_.FullName })
+
+    if (-not (Invoke-Assinatura -Arquivos $paraAssinar)) { exit 1 }
+} else {
+    Aviso "sem certificado: o conteudo nao sera assinado"
+    Write-Host "     O SmartScreen vai avisar, e o Smart App Control (Windows 11) BLOQUEIA." -ForegroundColor Yellow
+    Write-Host "     Para assinar: -CertificadoPfx <arquivo> -SenhaCertificado <senha>" -ForegroundColor Yellow
+    Write-Host "                   ou -CertificadoThumbprint <impressao digital>" -ForegroundColor Yellow
+}
+
+# ---------------------------------------------------------------------------
 Passo "Compilando o instalador"
 
 $argumentos = @("/Q", "`"$(Join-Path $raiz 'neosystem-agente.iss')`"")
@@ -208,6 +323,20 @@ $exe = Get-ChildItem (Join-Path $raiz 'dist') -Filter '*.exe' -ErrorAction Silen
        Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
 if (-not $exe) { Erro "O .exe nao foi gerado"; exit 1 }
+
+# O instalador em si tambem precisa de assinatura: e o primeiro arquivo que o Windows
+# inspeciona, antes mesmo de qualquer coisa ser extraida.
+if (Test-AssinaturaConfigurada) {
+    Passo "Assinando o instalador"
+    if (-not (Invoke-Assinatura -Arquivos @($exe.FullName))) { exit 1 }
+
+    $sig = Get-AuthenticodeSignature $exe.FullName
+    if ($sig.Status -ne 'Valid') {
+        Erro "O instalador ficou com assinatura invalida: $($sig.Status)"
+        exit 1
+    }
+    Ok "assinatura verificada: $(($sig.SignerCertificate.Subject -split ',')[0])"
+}
 
 Write-Host ""
 Ok "Instalador pronto:"
