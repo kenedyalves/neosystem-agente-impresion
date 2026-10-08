@@ -1,0 +1,52 @@
+name: Compilar instalador
+
+# Publica una Release con el .exe cada vez que se sube un tag "v*" (ej: v1.0.0).
+# Tambien se puede disparar a mano desde la pestana Actions.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Descargar PHP 7.4 (runtime embebido)
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\php.zip"
+          Invoke-WebRequest "https://downloads.php.net/~windows/releases/archives/php-7.4.33-Win32-vc15-x64.zip" -OutFile $zip
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\php"
+
+      - name: Instalar Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Compilar
+        shell: pwsh
+        run: ./installer/build.ps1 -PhpOrigem "$env:RUNNER_TEMP\php"
+
+      - name: Copia con nombre fijo (para un enlace que nunca cambia)
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem installer/dist -Filter *.exe | Select-Object -First 1
+          Copy-Item $exe.FullName installer/dist/neosystem-agente-impresion.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: instalador
+          path: installer/dist/*.exe
+
+      - name: Publicar Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/dist/*.exe
