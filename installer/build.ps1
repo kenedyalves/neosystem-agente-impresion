@@ -415,20 +415,22 @@ Passo "Copiando o agente"
 
 $origemAgente = Join-Path (Split-Path -Parent $raiz) 'agente.php'
 $origemBat    = Join-Path (Split-Path -Parent $raiz) 'iniciar.bat'
+$origemVbs    = Join-Path (Split-Path -Parent $raiz) 'iniciar-minimizado.vbs'
 
-foreach ($f in @($origemAgente, $origemBat)) {
+foreach ($f in @($origemAgente, $origemBat, $origemVbs)) {
     if (-not (Test-Path $f)) { Erro "Nao encontrado: $f"; exit 1 }
 }
 
 Copy-Item $origemAgente $payload
 Copy-Item $origemBat    $payload
+Copy-Item $origemVbs    $payload
 
 # Dentro do instalador o PHP vai junto, entao o .bat aponta para ele.
 $bat = Get-Content (Join-Path $payload 'iniciar.bat') -Raw
 $bat = $bat -replace 'set "PHP_EXE=php"', 'set "PHP_EXE=%~dp0php\php.exe"'
 Set-Content (Join-Path $payload 'iniciar.bat') $bat -Encoding ASCII
 
-Ok "agente.php e iniciar.bat prontos"
+Ok "agente.php, iniciar.bat e iniciar-minimizado.vbs prontos"
 
 # ---------------------------------------------------------------------------
 Passo "Verificando o runtime montado"

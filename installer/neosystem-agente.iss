@@ -10,7 +10,7 @@
 
 #define AppName        "Agente de Impresion NEOSYSTEM"
 #define AppShortName   "NeosystemAgente"
-#define AppVersion     "1.1.2"
+#define AppVersion     "1.1.3"
 #define AppPublisher   "NEOSYSTEM"
 
 ; La dirección la escribe el cliente en la instalación, así que el campo arranca
@@ -51,16 +51,18 @@ Source: "payload\php\*"; DestDir: "{app}\php"; Flags: ignoreversion recursesubdi
 ; El agente.
 Source: "payload\agente.php"; DestDir: "{app}"; Flags: ignoreversion
 Source: "payload\iniciar.bat"; DestDir: "{app}"; Flags: ignoreversion
+; Lanzador que deja el agente minimizado, para que no ocupe la pantalla del PDV.
+Source: "payload\iniciar-minimizado.vbs"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; Arranca junto con Windows: el PDV queda logueado todo el día.
-Name: "{userstartup}\{#AppName}"; Filename: "{app}\iniciar.bat"; WorkingDir: "{app}"; IconFilename: "{app}\php\php.exe"; Comment: "Agente de impresión NEOSYSTEM"
+Name: "{userstartup}\{#AppName}"; Filename: "{app}\iniciar-minimizado.vbs"; WorkingDir: "{app}"; IconFilename: "{app}\php\php.exe"; Comment: "Agente de impresión NEOSYSTEM"
 Name: "{group}\Ver estado del agente"; Filename: "{app}\iniciar.bat"; WorkingDir: "{app}"
 Name: "{group}\Desinstalar"; Filename: "{uninstallexe}"
 
 [Run]
 ; Arranca ya, sin esperar el próximo reinicio.
-Filename: "{app}\iniciar.bat"; Description: "Iniciar el agente ahora"; Flags: postinstall nowait shellexec skipifsilent
+Filename: "{app}\iniciar-minimizado.vbs"; Description: "Iniciar el agente ahora"; Flags: postinstall nowait shellexec skipifsilent
 
 [UninstallDelete]
 ; Config y log son generados, no instalados: hay que borrarlos a mano.
